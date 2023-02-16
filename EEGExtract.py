@@ -224,26 +224,34 @@ def lyapunov(eegData):
 # Fractal Embedding Dimension
 # From pyrem: packadge for sleep scoring from EEG data
 # https://github.com/gilestrolab/pyrem/blob/master/src/pyrem/univariate.py
-def hFD(a, k_max): #Higuchi FD
-    L = []
-    x = []
-    N = len(a)
 
-    for k in range(1,k_max):
-        Lk = 0
-        for m in range(0,k):
-            #we pregenerate all idxs
-            idxs = np.arange(1,int(np.floor((N-m)/k)),dtype=np.int32)
-            Lmk = np.sum(np.abs(a[m+idxs*k] - a[m+k*(idxs-1)]))
-            Lmk = (Lmk*(N - 1)/(((N - m)/ k)* k)) / k
-            Lk += Lmk
+def hFD(a, k_max): 
+    def paramshFD(a, k_max): #Higuchi FD
+        L = []
+        x = []
+        N = len(a)
 
-        L.append(np.log(Lk/(m+1)))
-        x.append([np.log(1.0/ k), 1])
+        for k in range(1,k_max):
+            Lk = 0
+            for m in range(0,k):
+                #we pregenerate all idxs
+                idxs = np.arange(1,int(np.floor((N-m)/k)),dtype=np.int32)
+                Lmk = np.sum(np.abs(a[m+idxs*k] - a[m+k*(idxs-1)]))
+                Lmk = (Lmk*(N - 1)/(((N - m)/ k)* k)) / k
+                Lk += Lmk
 
-    (p, r1, r2, s)=np.linalg.lstsq(x, L)
-    return p[0]
+            L.append(np.log(Lk/(m+1)))
+            x.append([np.log(1.0/ k), 1])
+
+        (p, r1, r2, s)=np.linalg.lstsq(x, L)
+        return p[0]
     
+    output = []
+    for i in range(a.shape[2]):
+        output.append(paramshFD(a[0,:,i],k_max))
+    return np.array(output)
+
+
 ##########
 # Hjorth Mobility
 # Hjorth Complexity
