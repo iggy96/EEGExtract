@@ -14,6 +14,14 @@ from sklearn.metrics import mutual_info_score
 import numpy as np
 from scipy import signal,integrate
 from sklearn.metrics.cluster import normalized_mutual_info_score as normed_mutual_info 
+from pyentrp import entropy as ent
+import antropy as ant
+import warnings
+from mne.time_frequency import psd_array_multitaper
+from scipy.integrate import simps
+warnings.filterwarnings("ignore", category=RuntimeWarning) 
+
+
 
 ################################################
 #	Auxiliary Functions
@@ -29,157 +37,7 @@ def filt_data(eegData, lowcut, highcut, fs, order=7):
     b, a = signal.butter(order, [low, high], btype='band')
     filt_eegData = signal.lfilter(b, a, eegData, axis = 1)
     return filt_eegData
-
-#########
-# remove short bursts / spikes 
-def fcnRemoveShortEvents(z,n):
-    for chan in range(z.shape[0]):
-        # check for too-short suppressions
-        ct=0
-        i0=1
-        i1=1 
-        for i in range(2,len(z[chan,:])):
-            if z[chan,i]==z[chan,i-1]:
-                ct=ct+1
-                i1=i
-            else:
-                if ct<n:
-                    z[chan,i0:i1] = 0
-                    z[chan,i1] = 0 #nasty little bug
-                ct=0
-                i0=i
-                i1=i
-        if z[chan,0] == 1 and z[chan,1] == 0:
-            z[chan,0] = 0
-    return z
-
-##########
-# Find interval of consistent values in binary 1D numpy array
-def get_intervals(A,B,endIdx=500):
-    # This function gives you intervals (a1,b1), (a2,b3) for every a in A=[a1,a2,a3,..]
-    # and the smallest element in b that is larger than a.
-    intervals = []
-    for ii,A_idx_lst in enumerate(A):
-        B_idx_lst = [bisect.bisect_left(B[ii], idx) for idx in A_idx_lst]
-        chan_intervals = []
-        for jj,idx_l in enumerate(B_idx_lst):
-            if idx_l == len(B[ii]):
-                chan_intervals.append((A_idx_lst[jj],endIdx))
-            else:
-                chan_intervals.append((A_idx_lst[jj],B[ii][idx_l]))
-        intervals.append(chan_intervals)
-        # previous code already takes care of the [] possibility
-        #if B_idx_lst == []:
-        #    intervals.append([])
-    return intervals
-
-##########
-# Detect bursts and supressions in eeg data
-def burst_supression_detection(x,fs,suppression_threshold = 10):
-	'''
-	# DETECT EMG ARTIFACTS.
-	nyq = 0.5 * fs
-	low = low / nyq
-	high = high / nyq
-	be, ae = signal.butter(order, [low, high], btype='band')
-	'''
-	# CALCULATE ENVELOPE
-	e = abs(signal.hilbert(x,axis=1));
-	# same as smooth(e,Fs/4) in MATLAB, apply 1/2 second smoothing
-	ME = np.array([np.convolve(el,np.ones(int(fs/4))/(fs/4),'same') for el in e.tolist()])
-	e = ME
-	# DETECT SUPRESSIONS
-	# apply threshold -- 10uv
-	z = (ME<suppression_threshold)
-	# remove too-short suppression segments
-	z = fcnRemoveShortEvents(z,fs/2)
-	# remove too-short burst segments
-	b = fcnRemoveShortEvents(1-z,fs/2)
-	z = 1-b
-	went_high = [np.where(np.array(chD[:-1]) < np.array(chD[1:]))[0].tolist() for chD in z.tolist()]
-	went_low = [np.where(np.array(chD[:-1]) > np.array(chD[1:]))[0].tolist() for chD in z.tolist()]
-
-	bursts = get_intervals(went_high,went_low)
-	supressions = get_intervals(went_low,went_high)
-
-	return bursts,supressions
-
-##########
-# Coherence in the Delta Band
-def CoherenceDelta(eegData, i, j, fs=100):
-    nfft=eegData.shape[1]
-    f, Cxy = signal.coherence(eegData[i,:,:], eegData[j,:,:], fs=fs, nfft=nfft, axis=0)#, window=np.hanning(nfft))
-    out = np.mean(Cxy[np.all([f >= 0.5, f<=4], axis=0)], axis=0)
-    return out
-
-##########
-# correlation across channels
-def PhaseLagIndex(eegData, i, j):
-    hxi = ss.hilbert(eegData[i,:,:])
-    hxj = ss.hilbert(eegData[j,:,:])
-    # calculating the INSTANTANEOUS PHASE
-    inst_phasei = np.arctan(np.angle(hxi))
-    inst_phasej = np.arctan(np.angle(hxj))
-
-    out = np.abs(np.mean(np.sign(inst_phasej - inst_phasei), axis=0))
-    return out
-
-##########
-# Cross Correlation
-def crossCorrelation(eegData, i, j):
-    out = np.zeros(eegData.shape[2])
-    for epoch in range(eegData.shape[2]):
-        ccor = np.correlate(eegData[i,:,epoch], eegData[j,:,epoch], mode="full")
-        absccor = np.abs(ccor)
-        out[epoch] = (np.max(absccor) - np.mean(absccor)) / np.std(absccor)
-    return out
-
-##########
-# Auxilary Cross-correlation Lag
-def corrCorrLagAux(eegData,ii,jj,Fs=100):
-    out = np.zeros(eegData.shape[2])
-    lagCorr = []
-    for lag in range(0,eegData.shape[1],int(0.2*Fs)):
-        tmp = eegData.copy()
-        tmp[jj,:,:] = np.roll(tmp[jj,:,:], lag, axis=0)
-        lagCorr.append(CrossCorrelation(tmp, ii, jj, Fs))
-    return np.argmax(lagCorr,axis=0)
-
-################################################
-#	bandpower Functions
-################################################
-
-##########
-# compute the bandpower (area under segment (from fband[0] to fband[1] in Hz)
-# of curve in freqency domain) of data, at sampling frequency of Fs (100 ussually)
-def bandpower(data, fs, fband):
-    freqs, powers = periodogram(data, fs)
-    idx_min = np.argmax(freqs > fband[0]) - 1
-    idx_max = np.argmax(freqs > fband[1]) - 1
-    idx_delta = np.zeros(dtype=bool, shape=freqs.shape)
-    idx_delta[idx_min:idx_max] = True
-    bpower = simps(powers[idx_delta], freqs[idx_delta])
-    return bpower
-
-##########
-# computes the same thing as vecbandpower but with a loop
-def pfvecbandpower(data, fs, fband):
-    bpowers = np.zeros((data.shape[0], data.shape[2]))
-    for i in range(data.shape[0]):
-        freqs, powers = periodogram(data[i, :, :], fs, axis=0)
-        idx_min = np.argmax(freqs > fband[0]) - 1
-        idx_max = np.argmax(freqs > fband[1]) - 1
-        idx_delta = np.zeros(dtype=bool, shape=freqs.shape)
-        idx_delta[idx_min:idx_max] = True
-       
-        bpower = simps(powers[idx_delta, :], freqs[idx_delta], axis=0)
-        bpowers[i, :] = bpower
-
-    return bpowers
-
-################################################
-#	Complexity features
-################################################    
+ 
 
 ##########
 # Extract the Shannon Entropy
@@ -192,33 +50,15 @@ def shannonEntropy(eegData, bin_min, bin_max, binWidth):
             nz = counts > 0
             prob = counts[nz] / np.sum(counts[nz])
             H[chan, epoch] = -np.dot(prob, np.log2(prob/binWidth))
-    return H
+            #H = H.reshape(H.shape[1],)
+    return H.reshape(H.shape[1],)
     
-##########
-# Extract the tsalis Entropy
-def tsalisEntropy(eegData, bin_min, bin_max, binWidth, orders = [1]):
-    H = [np.zeros((eegData.shape[0], eegData.shape[2]))]*len(orders)
-    for chan in range(H[0].shape[0]):
-        for epoch in range(H[0].shape[1]):
-            counts, bins = np.histogram(eegData[chan,:,epoch], bins=np.arange(-200+1, 200, 2))
-            dist = dit.Distribution([str(bc).zfill(5) for bc in bins[:-1]],counts/sum(counts))
-            for ii,order in enumerate(orders):
-                H[ii][chan,epoch] = tsallis_entropy(dist,order)
-    return H
-
-##########
-# Cepstrum Coefficients (n=2)
-def mfcc(eegData,fs,order=2):
-    H = np.zeros((eegData.shape[0], eegData.shape[2],order))
-    for chan in range(H.shape[0]):
-        for epoch in range(H.shape[1]):
-            H[chan, epoch, : ] = librosa.feature.mfcc(np.asfortranarray(eegData[chan,:,epoch]), sr=fs)[0:order].T
-    return H
 
 ##########
 # Lyapunov exponent
 def lyapunov(eegData):
-    return np.mean(np.log(np.abs(np.gradient(eegData,axis=1))),axis=1)
+    l = np.mean(np.log(np.abs(np.gradient(eegData,axis=1))),axis=1)
+    return l.reshape(l.shape[1],)
     
 ##########
 # Fractal Embedding Dimension
@@ -249,7 +89,8 @@ def hFD(a, k_max):
     output = []
     for i in range(a.shape[2]):
         output.append(paramshFD(a[0,:,i],k_max))
-    return np.array(output)
+    output = np.array(output)
+    return output
 
 
 ##########
@@ -270,139 +111,23 @@ def hjorthParameters(xV):
     mob = mdx2 / mx2
     complexity = np.sqrt((mddx2 / mdx2) / mob)
     mobility = np.sqrt(mob)
+    complexity = complexity.reshape(complexity.shape[1],)
+    mobility = mobility.reshape(mobility.shape[1],)
 
     # PLEASE NOTE that Mohammad did NOT ACTUALLY use hjorth complexity,
     # in the matlab code for hjorth complexity subtraction by mob not division was used 
     return mobility, complexity
 
-##########
-# false nearest neighbor descriptor
-def falseNearestNeighbor(eegData, fast=True):
-    # Average Mutual Information
-    # There exist good arguments that if the time delayed mutual
-    # information exhibits a marked minimum at a certain value of tex2html_wrap_inline6553,
-    # then this is a good candidate for a reasonable time delay.
-    npts = 1000   # not sure about this?
-    maxdims = 50
-    max_delay = 2 # max_delay = 200  # TODO: need to use 200, but also need to speed this up
-    distance_thresh = 0.5
-    
-    out = np.zeros((eegData.shape[0], eegData.shape[2]))
-    for chan in range(eegData.shape[0]):
-        for epoch in range(eegData.shape[2]):
-            if fast:
-                out[chan, epoch] = 0
-            else:
-                cur_eegData = eegData[chan, :, epoch]
-                lagidx = 0  # we are looking for the index of the lag that makes the signal maximally uncorrelated to the original
-                # # minNMI = 1  # normed_mutual_info is from 1 (perfectly correlated) to 0 (not at all correlated) 
-                # # for lag in range(1, max_delay):
-                # #     x = cur_eegData[:-lag]
-                # #     xlag = cur_eegData[lag:]
-                # #     # convert float data into histogram bins
-                # #     nbins = int(np.floor(1 + np.log2(len(x)) + 0.5))
-                # #     x_discrete = np.histogram(x, bins=nbins)[0]
-                # #     xlag_discrete = np.histogram(xlag, bins=nbins)[0]
-                # #     cNMI = normed_mutual_info(x_discrete, xlag_discrete)
-                # #     if cNMI < minNMI:
-                # #         minNMI = cNMI
-                # #         lagidx = lag
-                # nearest neighbors part
-                knn = int(max(2, 6*lagidx))  # heuristic (number of nearest neighbors to look up)
-                m = 1 # lagidx + 1
 
-                # y is the embedded version of the signal
-                y = np.zeros((maxdims+1, npts))
-                for d in range(maxdims+1):
-                    tmp = cur_eegData[d*m:d*m + npts]
-                    y[d, :tmp.shape[0]] = tmp
-                
-                nnd = np.ones((npts, maxdims))
-                nnz = np.zeros((npts, maxdims))
-                
-                # see where it tends to settle
-                for d in range(1, maxdims):
-                    for k in range(0, npts):
-                        # get the distances to all points in the window (distance given embedding dimension)
-                        dists = []
-                        for nextpt in range(1, knn+1):
-                            if k+nextpt < npts:
-                                dists.append(np.linalg.norm(y[:d, k] - y[:d, k+nextpt]))
-                        if len(dists) > 0:
-                            minIdx = np.argmin(dists)
-                            if dists[minIdx] == 0:
-                                dists[minIdx] = 0.0000001  # essentially 0 just silence the error
-                            nnd[k, d-1] = dists[minIdx]
-                            nnz[k, d-1] = np.abs( y[d+1, k] - y[d+1, minIdx+1+k] )
-                # aggregate results
-                mindim = np.mean(nnz/nnd > distance_thresh, axis=0) < 0.1
-                # get the index of the first occurence of the value true
-                # (a 1 in the binary representation of true and false)
-                out[chan, epoch] = np.argmax(mindim)
-        
-    return out 
-
-##########
-# ARMA coefficients
-def arma(eegData,order=2):
-    H = np.zeros((eegData.shape[0], eegData.shape[2],order))
-    for chan in range(H.shape[0]):
-        for epoch in range(H.shape[1]):
-            arma_mod = sm.tsa.ARMA(eegData[chan,:,epoch], order=(order,order))
-            arma_res = arma_mod.fit(trend='nc', disp=-1)
-            H[chan, epoch, : ] = arma_res.arparams
-    return H
-
-################################################
-#	Continuity features
-################################################  
-
-##########
 # median frequency
 def medianFreq(eegData,fs):
     H = np.zeros((eegData.shape[0], eegData.shape[2]))
     for chan in range(H.shape[0]):
         freqs, powers = signal.periodogram(eegData[chan, :, :], fs, axis=0)
         H[chan,:] = freqs[np.argsort(powers,axis=0)[len(powers)//2]]
-    return H
+        #H = H.reshape(H.shape[1],)
+    return H.reshape(H.shape[1],)
 
-##########
-# calculate band power
-def bandPower(eegData, lowcut, highcut, fs):
-	eegData_band = filt_data(eegData, lowcut, highcut, fs, order=7)
-	freqs, powers = signal.periodogram(eegData_band, fs, axis=1)
-	bandPwr = np.mean(powers,axis=1)
-	return bandPwr
-
-##########
-# numberOfSpikes    
-def spikeNum(eegData,minNumSamples=7,stdAway = 3):
-    H = np.zeros((eegData.shape[0], eegData.shape[2]))
-    for chan in range(H.shape[0]):
-        for epoch in range(H.shape[1]):
-            mean = np.mean(eegData[chan, :, epoch])
-            std = np.std(eegData[chan,:,epoch],axis=1)
-            H[chan,epoch] = len(signal.find_peaks(abs(eegData[chan,:,epoch]-mean), 3*std,epoch,width=7)[0])
-    return H
-
-##########    
-# Standard Deviation
-def eegStd(eegData):
-	std_res = np.std(eegData,axis=1)
-	return std_res
-
-##########
-# α/δ Ratio
-def eegRatio(eegData,fs):
-	# alpha (8–12 Hz)
-	eegData_alpha = filt_data(eegData, 8, 12, fs)
-	# delta (0.5–4 Hz)
-	eegData_delta = filt_data(eegData, 0.5, 4, fs)
-	# calculate the power
-	powers_alpha = bandPower(eegData, 8, 12, fs)
-	powers_delta = bandPower(eegData, 0.5, 4, fs)
-	ratio_res = np.sum(powers_alpha,axis=0) / np.sum(powers_delta,axis=0)
-	return np.expand_dims(ratio_res, axis=0)
 
 ###########
 # Regularity (burst-suppression)
@@ -420,63 +145,314 @@ def eegRegularity(eegData, Fs=100):
     # COMPUTE THE Regularity
     # dot each 5min epoch with the quadratic data points and then normalize by the size of the dotted things    
     reg = np.sqrt( np.einsum('ijk,j->ik', q, u2) / (np.sum(q, axis=1)*(N**2)/3) )
+    reg = reg.reshape(reg.shape[1],)
     return reg
 
 ###########
 # Voltage < (5μ, 10μ, 20μ)
 def eegVoltage(eegData,voltage=20):
-	eegFilt = eegData.copy()
-	eegFilt[abs(eegFilt) > voltage] = np.nan
-	volt_res = np.nanmean(eegFilt,axis=1)
-	return volt_res
+    eegFilt = eegData.copy()
+    eegFilt[abs(eegFilt) > voltage] = np.nan
+    volt_res = np.nanmean(eegFilt,axis=1)
+    volt_res = volt_res.reshape(volt_res.shape[1],)
+    return volt_res
 
-##########
-# Diffuse Slowing
-# look for diffuse slowing (bandpower max from frequency domain integral)
-# repeated integration of a huge tensor is really expensive
-def diffuseSlowing(eegData, Fs=100, fast=True):
-    maxBP = np.zeros((eegData.shape[0], eegData.shape[2]))
-    idx = np.zeros((eegData.shape[0], eegData.shape[2]))
-    if fast:
-        return idx
-    for j in range(1, Fs//2):
-        print("BP", j)
-        cbp = bandpower(eegData, Fs, [j-1, j])
-        biggerCIdx = cbp > maxBP
-        idx[biggerCIdx] = j
-        maxBP[biggerCIdx] = cbp[biggerCIdx]
-    return (idx < 8)
 
-##########
-# Spikes
-def spikeNum(eegData,minNumSamples=7,stdAway = 3):
-    H = np.zeros((eegData.shape[0], eegData.shape[2]))
-    for chan in range(H.shape[0]):
-        for epoch in range(H.shape[1]):
-            mean = np.mean(eegData[chan, :, epoch])
-            std = np.std(eegData[chan,:,epoch])
-            H[chan,epoch] = len(signal.find_peaks(abs(eegData[chan,:,epoch]-mean), 3*std,epoch,width=7)[0])
-    return H
+## Connectivity Features
+def sample_entropy(x):
+    def params_sample_entropy(y):
+        return ant.sample_entropy(y)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_sample_entropy(x[:,i]))
+    output = np.array(output).T
+    return output
 
-##########
-# Delta Burst after spike
-def burstAfterSpike(eegData,eegData_subband,minNumSamples=7,stdAway = 3):
-    H = np.zeros((eegData.shape[0], eegData.shape[2]))
-    for chan in range(H.shape[0]):
-        for epoch in range(H.shape[1]):
-            preBurst = 0
-            postBurst = 0
-            mean = np.mean(eegData[chan, :, epoch])
-            std = np.std(eegData[chan,:,epoch])
-            idxList = signal.find_peaks(abs(eegData[chan,:,epoch]-mean), stdAway*std,epoch,width=minNumSamples)[0]
-            for idx in idxList:
-                preBurst += np.mean(eegData_subband[chan,idx-7:idx-1,epoch])
-                postBurst += np.mean(eegData_subband[chan,idx+1:idx+7,epoch])
-            H[chan,epoch] = postBurst - preBurst
-    return H
+def multiscale_entropy(x):
+    def params_multiscale_entropy(y):
+        return ent.multiscale_entropy(y, 1, 0.1 * np.std(y),1)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_multiscale_entropy(x[:,i]))
+    output = np.array(output).T
+    return output.reshape(output.shape[1],)
 
-##########
-# Sharp spike
+def permutation_entropy(x):
+    def params_permutation_entropy(y):
+        return ant.perm_entropy(y, normalize=True)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_permutation_entropy(x[:,i]))
+    output = np.array(output).T
+    return output
+
+def spectral_entropy(x,fs):
+    def params_spectral_entropy(y,fs):
+        return ant.spectral_entropy(y, fs, method='welch', normalize=True)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_spectral_entropy(x[:,i],fs))
+    output = np.array(output).T
+    return output
+
+def svd_entropy(x):
+    def params_svd_entropy(y):
+        return ant.svd_entropy(y, normalize=True)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_svd_entropy(x[:,i]))
+    output = np.array(output).T
+    return output
+
+def app_entropy(x):
+    def params_app_entropy(y):
+        return ant.app_entropy(y)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_app_entropy(x[:,i]))
+    output = np.array(output).T
+    return output
+
+def lziv(x):
+    def params_lziv(y):
+        return ant.lziv_complexity(y)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_lziv(x[:,i]))
+    output = np.array(output).T
+    return output
+
+def petrosian(x):
+    def params_petrosian(y):
+        return ant.petrosian_fd(y)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_petrosian(x[:,i]))
+    output = np.array(output).T
+    return output
+
+def katz(x):
+    def params_katz(y):
+        return ant.katz_fd(y)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_katz(x[:,i]))
+    output = np.array(output).T
+    return output
+
+def dfa(x):
+    def params_dfa(y):
+        return ant.detrended_fluctuation(y)
+    
+    output = []
+    for i in range(x.shape[1]):
+        output.append(params_dfa(x[:,i]))
+    output = np.array(output).T
+    return output
+
+def relative_bandpower(data_,bandFreq,sampFreq):
+    def params_relbandpower(data, sf, band):
+        """Compute the average power of the signal x in a specific frequency band.
+
+        Requires MNE-Python >= 0.14.
+
+        Parameters
+        ----------
+        data : 1d-array
+        Input signal in the time-domain.
+        sf : float
+        Sampling frequency of the data.
+        band : list
+        Lower and upper frequencies of the band of interest.
+        method : string
+        Periodogram method: 'welch' or 'multitaper'
+        window_sec : float
+        Length of each window in seconds. Useful only if method == 'welch'.
+        If None, window_sec = (1 / min(band)) * 2.
+        relative : boolean
+        If True, return the relative power (= divided by the total power of the signal).
+        If False (default), return the absolute power.
+
+        Return
+        ------
+        bp : float
+        Absolute or relative band power.
+        """
+
+        band = np.asarray(band)
+        low, high = band
+        psd, freqs = psd_array_multitaper(data, sf, adaptive=True,
+                                                normalization='full', verbose=30)
+        freq_res = freqs[1] - freqs[0]
+        idx_band = np.logical_and(freqs >= low, freqs <= high)
+        bp = simps(psd[idx_band], dx=freq_res)
+        bp /= simps(psd, dx=freq_res)
+        return bp
+    
+    output = []
+    for i in range(data_.shape[1]):
+        output.append(params_relbandpower(data_[:,i],sampFreq,bandFreq))
+    return np.array(output).T
+
+
+# Standard Deviation
+def eegStd(eegData):
+    std_res = np.std(eegData,axis=1)
+    std_res = std_res.reshape(std_res.shape[1],)
+    return std_res
+
+
+
+def ratioDeltaTheta(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    ratio_res = powers_delta / powers_theta
+    return ratio_res
+
+def ratioThetaDelta(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    ratio_res = powers_theta / powers_delta
+    return ratio_res
+
+def ratioDeltaAlpha(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    ratio_res = powers_delta / powers_alpha
+    return ratio_res
+
+def ratioAlphaDelta(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    ratio_res = powers_alpha / powers_delta
+    return ratio_res
+
+def ratioDeltaBeta(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    ratio_res = powers_delta / powers_beta
+    return ratio_res
+
+def ratioBetaDelta(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    ratio_res = powers_beta / powers_delta
+    return ratio_res
+
+def ratioDeltaGamma(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_delta / powers_gamma
+    return ratio_res
+
+def ratioGammaDelta(eegData,fs):
+    # calculate the power
+    powers_delta = relative_bandpower(eegData, [0.5, 4], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_gamma / powers_delta
+    return ratio_res
+
+def ratioThetaAlpha(eegData,fs):
+    # calculate the power
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    ratio_res = powers_theta / powers_alpha
+    return ratio_res
+
+def ratioAlphaTheta(eegData,fs):
+    # calculate the power
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    ratio_res = powers_alpha / powers_theta
+    return ratio_res
+
+def ratioThetaBeta(eegData,fs):
+    # calculate the power
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    ratio_res = powers_theta / powers_beta
+    return ratio_res
+
+def ratioBetaTheta(eegData,fs):
+    # calculate the power
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    ratio_res = powers_beta / powers_theta
+    return ratio_res
+
+def ratioThetaGamma(eegData,fs):
+    # calculate the power
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_theta / powers_gamma
+    return ratio_res
+
+def ratioGammaTheta(eegData,fs):
+    # calculate the power
+    powers_theta = relative_bandpower(eegData, [4, 8], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_gamma / powers_theta
+    return ratio_res
+
+def ratioAlphaBeta(eegData,fs):
+    # calculate the power
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    ratio_res = powers_alpha / powers_beta
+    return ratio_res
+
+def ratioBetaAlpha(eegData,fs):
+    # calculate the power
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    ratio_res = powers_beta / powers_alpha
+    return ratio_res
+
+def ratioAlphaGamma(eegData,fs):
+    # calculate the power
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_alpha / powers_gamma
+    return ratio_res
+
+def ratioGammaAlpha(eegData,fs):
+    # calculate the power
+    powers_alpha = relative_bandpower(eegData, [8, 12], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_gamma / powers_alpha
+    return ratio_res
+
+def ratioBetaGamma(eegData,fs):
+    # calculate the power
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_beta / powers_gamma
+    return ratio_res
+
+def ratioGammaBeta(eegData,fs):
+    # calculate the power
+    powers_beta = relative_bandpower(eegData, [12, 30], fs)
+    powers_gamma = relative_bandpower(eegData, [30, 45], fs)
+    ratio_res = powers_gamma / powers_beta
+    return ratio_res
+
+
 def shortSpikeNum(eegData,minNumSamples=7,stdAway = 3):
     H = np.zeros((eegData.shape[0], eegData.shape[2]))
     for chan in range(H.shape[0]):
@@ -486,160 +462,327 @@ def shortSpikeNum(eegData,minNumSamples=7,stdAway = 3):
             longSpikes = set(signal.find_peaks(abs(eegData[chan,:,epoch]-mean), 3*std,epoch,width=7)[0])
             shortSpikes = set(signal.find_peaks(abs(eegData[chan,:,epoch]-mean), 3*std,epoch,width=1)[0])
             H[chan,epoch] = len(shortSpikes.difference(longSpikes))
-    return H
+            #H = H.reshape((H.shape[1],))
+    return H.reshape((H.shape[1],))
 
-##########
-# Number of Bursts
-def numBursts(eegData,fs):
-	bursts = []
-	supressions = []
-	for epoch in range(eegData.shape[2]):
-		epochBurst,epochSupressions = burst_supression_detection(eegData[:,:,epoch],fs,suppression_threshold=10)#,low=30,high=49)
-		bursts.append(epochBurst)
-		supressions.append(epochSupressions)
-	# Number of Bursts
-	numBursts_res = np.zeros((eegData.shape[0], eegData.shape[2]))
-	for chan in range(numBursts_res.shape[0]):
-		for epoch in range(numBursts_res.shape[1]):
-			numBursts_res[chan,epoch] = len(bursts[epoch][chan])
-	return numBursts_res
-	
-##########
-# Burst length μ and σ
-def burstLengthStats(eegData,fs):
-	bursts = []
-	supressions = []
-	for epoch in range(eegData.shape[2]):
-		epochBurst,epochSupressions = burst_supression_detection(eegData[:,:,epoch],fs,suppression_threshold=10)#,low=30,high=49)
-		bursts.append(epochBurst)
-		supressions.append(epochSupressions)
-	# Number of Bursts
-	burstMean_res = np.zeros((eegData.shape[0], eegData.shape[2]))
-	burstStd_res = np.zeros((eegData.shape[0], eegData.shape[2]))
-	for chan in range(burstMean_res.shape[0]):
-		for epoch in range(burstMean_res.shape[1]):
-			burstMean_res[chan,epoch] = np.mean([burst[1]-burst[0] for burst in bursts[epoch][chan]])
-			burstStd_res[chan,epoch] = np.std([burst[1]-burst[0] for burst in bursts[epoch][chan]])
-	burstMean_res = np.nan_to_num(burstMean_res)
-	burstStd_res = np.nan_to_num(burstStd_res)
-	return burstMean_res,burstStd_res
 
-##########
-# Burst band powers (δ, α, θ, β, γ)
-def burstBandPowers(eegData, lowcut, highcut, fs, order=7):
-	band_burst_powers = np.zeros((eegData.shape[0], eegData.shape[2]))
-	bursts = []
-	supressions = []
-	for epoch in range(eegData.shape[2]):
-		epochBurst,epochSupressions = burst_supression_detection(eegData[:,:,epoch],fs,suppression_threshold=10)#,low=30,high=49)
-		bursts.append(epochBurst)
-		supressions.append(epochSupressions)
-	eegData_band = filt_data(eegData, lowcut, highcut, fs, order=7)
-	for epoch,epochBursts in enumerate(bursts):
-		for chan,chanBursts in enumerate(epochBursts):
-			epochPowers = []  
-			for burst in chanBursts:
-				if burst[1] == eegData.shape[1]:
-					burstData =  eegData_band[:,burst[0]:,epoch]
-				else:
-					burstData =  eegData_band[:,burst[0]:burst[1],epoch]
-				freqs, powers = signal.periodogram(burstData, fs, axis=1)
-				epochPowers.append(np.mean(powers,axis=1))
-			band_burst_powers[chan,epoch] = np.mean(epochPowers)	
-	return band_burst_powers
 
-##########
-# Number of Suppressions
-def numSuppressions(eegData,fs,suppression_threshold=10):
-	bursts = []
-	supressions = []
-	for epoch in range(eegData.shape[2]):
-		epochBurst,epochSupressions = burst_supression_detection(eegData[:,:,epoch],fs,suppression_threshold=suppression_threshold)#,low=30,high=49)
-		bursts.append(epochBurst)
-		supressions.append(epochSupressions)
-	numSupprs_res = np.zeros((eegData.shape[0], eegData.shape[2]))
-	for chan in range(numSupprs_res.shape[0]):
-		for epoch in range(numSupprs_res.shape[1]):
-			numSupprs_res[chan,epoch] = len(supressions[epoch][chan])
-	return numSupprs_res
 
-##########
-# Suppression length μ and σ
-def suppressionLengthStats(eegData,fs,suppression_threshold=10):
-	bursts = []
-	supressions = []
-	for epoch in range(eegData.shape[2]):
-		epochBurst,epochSupressions = burst_supression_detection(eegData[:,:,epoch],fs,suppression_threshold=suppression_threshold)#,low=30,high=49)
-		bursts.append(epochBurst)
-		supressions.append(epochSupressions)
-	supressionMean_res = np.zeros((eegData.shape[0], eegData.shape[2]))
-	supressionStd_res = np.zeros((eegData.shape[0], eegData.shape[2]))
-	for chan in range(supressionMean_res.shape[0]):
-		for epoch in range(supressionMean_res.shape[1]):
-			supressionMean_res[chan,epoch] = np.mean([suppr[1]-suppr[0] for suppr in supressions[epoch][chan]])
-			supressionStd_res[chan,epoch] = np.std([suppr[1]-suppr[0] for suppr in supressions[epoch][chan]])
-	supressionMean_res = np.nan_to_num(supressionMean_res)
-	supressionStd_res = np.nan_to_num(supressionStd_res)
-	return supressionMean_res, supressionStd_res
+def compile_features(data,fs,delta,theta,alpha,beta,gamma,data_name):
+    """
+    data: (1, epoch_length, num_epochs)
+    """
+    delta_data = filt_data(data, delta[0], delta[1], fs)
+    theta_data = filt_data(data, theta[0], theta[1], fs)
+    alpha_data = filt_data(data, alpha[0], alpha[1], fs)
+    beta_data = filt_data(data, beta[0], beta[1], fs)
+    gamma_data = filt_data(data, gamma[0], gamma[1], fs)
 
-################################################
-#	Connectivity features
-################################################
+    # Time Domain Features
+    print("Calculating time domain features...")
+    shannonRes = shannonEntropy(data, bin_min=-200, bin_max=200, binWidth=2)
+    LyapunovRes = lyapunov(data)
+    HiguchiFD_Res  = hFD(data,3)
+    HjorthMob, HjorthComp = hjorthParameters(data)
+    medianFreqRes = medianFreq(data, fs)
+    delta_rbandpwr = relative_bandpower(data[0], delta, fs)
+    theta_rbandpwr = relative_bandpower(data[0], theta, fs)
+    alpha_rbandpwr = relative_bandpower(data[0], alpha, fs)
+    beta_rbandpwr = relative_bandpower(data[0], beta, fs)
+    gamma_rbandpwr = relative_bandpower(data[0], gamma, fs)
+    stdRes = eegStd(data)
+    delta_theta_ratio = ratioDeltaTheta(data[0],fs)
+    theta_delta_ratio = ratioThetaDelta(data[0],fs)
+    delta_alpha_ratio = ratioDeltaAlpha(data[0],fs)
+    alpha_delta_ratio = ratioAlphaDelta(data[0],fs)
+    delta_beta_ratio = ratioDeltaBeta(data[0],fs)
+    beta_delta_ratio = ratioBetaDelta(data[0],fs)
+    delta_gamma_ratio = ratioDeltaGamma(data[0],fs)
+    gamma_delta_ratio = ratioGammaDelta(data[0],fs)
+    theta_alpha_ratio = ratioThetaAlpha(data[0],fs)
+    alpha_theta_ratio = ratioAlphaTheta(data[0],fs)
+    theta_beta_ratio = ratioThetaBeta(data[0],fs)
+    beta_theta_ratio = ratioBetaTheta(data[0],fs)
+    theta_gamma_ratio = ratioThetaGamma(data[0],fs)
+    gamma_theta_ratio = ratioGammaTheta(data[0],fs)
+    alpha_beta_ratio = ratioAlphaBeta(data[0],fs)
+    beta_alpha_ratio = ratioBetaAlpha(data[0],fs)
+    alpha_gamma_ratio = ratioAlphaGamma(data[0],fs)
+    gamma_alpha_ratio = ratioGammaAlpha(data[0],fs)
+    beta_gamma_ratio = ratioBetaGamma(data[0],fs)
+    gamma_beta_ratio = ratioGammaBeta(data[0],fs)
+    regularity_res = eegRegularity(data,fs)
+    volt05_res = eegVoltage(data,5)
+    volt10_res = eegVoltage(data,10)
+    volt20_res = eegVoltage(data,20)
+    volt50_res = eegVoltage(data,50)
+    volt100_res = eegVoltage(data,100)
+    minNumSamples = int(70*fs/1000)
+    sharpSpike = shortSpikeNum(data,minNumSamples)
+    sampEN = sample_entropy(data[0])
+    multiscaleEN = multiscale_entropy(data[0])
+    permEN = permutation_entropy(data[0])
+    specEN = spectral_entropy(data[0],fs)
+    svdEN = svd_entropy(data[0])
+    appEN = app_entropy(data[0])
+    lziv_comp = lziv(data[0])
+    petrosian_fd = petrosian(data[0])
+    katz_fd = katz(data[0])
+    dfa_fd = dfa(data[0])
 
-##########
-# Coherence - δ
-def coherence(eegData,fs):
-	coh_res = []
-	for ii, jj in itertools.combinations(range(eegData.shape[0]), 2):
-		coh_res.append(CoherenceDelta(eegData, ii, jj, fs=fs))
-	coh_res = np.array(coh_res)
-	return coh_res
+    # Frequency Domain Features
+    print("Calculating frequency domain features...")
+    shannonRes_delta = shannonEntropy(delta_data, bin_min=-200, bin_max=200, binWidth=2)
+    shannonRes_theta = shannonEntropy(theta_data, bin_min=-200, bin_max=200, binWidth=2)
+    shannonRes_alpha = shannonEntropy(alpha_data, bin_min=-200, bin_max=200, binWidth=2)
+    shannonRes_beta = shannonEntropy(beta_data, bin_min=-200, bin_max=200, binWidth=2)
+    shannonRes_gamma = shannonEntropy(gamma_data, bin_min=-200, bin_max=200, binWidth=2)
+    LyapunovRes_delta = lyapunov(delta_data)
+    LyapunovRes_theta = lyapunov(theta_data)
+    LyapunovRes_alpha = lyapunov(alpha_data)
+    LyapunovRes_beta = lyapunov(beta_data)
+    LyapunovRes_gamma = lyapunov(gamma_data)
+    HiguchiFD_Res_delta  = hFD(delta_data,3)
+    HiguchiFD_Res_theta  = hFD(theta_data,3)
+    HiguchiFD_Res_alpha  = hFD(alpha_data,3)
+    HiguchiFD_Res_beta  = hFD(beta_data,3)
+    HiguchiFD_Res_gamma  = hFD(gamma_data,3)
+    HjorthMob_delta, HjorthComp_delta = hjorthParameters(delta_data)
+    HjorthMob_theta, HjorthComp_theta = hjorthParameters(theta_data)
+    HjorthMob_alpha, HjorthComp_alpha = hjorthParameters(alpha_data)
+    HjorthMob_beta, HjorthComp_beta = hjorthParameters(beta_data)
+    HjorthMob_gamma, HjorthComp_gamma = hjorthParameters(gamma_data)
+    stdRes_delta = eegStd(delta_data)
+    stdRes_theta = eegStd(theta_data)
+    stdRes_alpha = eegStd(alpha_data)
+    stdRes_beta = eegStd(beta_data)
+    stdRes_gamma = eegStd(gamma_data)
+    regularity_res_delta = eegRegularity(delta_data,fs)
+    regularity_res_theta = eegRegularity(theta_data,fs)
+    regularity_res_alpha = eegRegularity(alpha_data,fs)
+    regularity_res_beta = eegRegularity(beta_data,fs)
+    regularity_res_gamma = eegRegularity(gamma_data,fs)
+    print('regularity_res_delta shape: ',regularity_res_delta.shape)
+    print('regularity_res_theta shape: ',regularity_res_theta.shape)
+    print('regularity_res_alpha shape: ',regularity_res_alpha.shape)
+    print('regularity_res_beta shape: ',regularity_res_beta.shape)
+    print('regularity_res_gamma shape: ',regularity_res_gamma.shape)
+    volt05_res_delta = eegVoltage(delta_data,5)
+    volt05_res_theta = eegVoltage(theta_data,5)
+    volt05_res_alpha = eegVoltage(alpha_data,5)
+    volt05_res_beta = eegVoltage(beta_data,5)
+    volt05_res_gamma = eegVoltage(gamma_data,5)
+    volt10_res_delta = eegVoltage(delta_data,10)
+    volt10_res_theta = eegVoltage(theta_data,10)
+    volt10_res_alpha = eegVoltage(alpha_data,10)
+    volt10_res_beta = eegVoltage(beta_data,10)
+    volt10_res_gamma = eegVoltage(gamma_data,10)
+    volt20_res_delta = eegVoltage(delta_data,20)
+    volt20_res_theta = eegVoltage(theta_data,20)
+    volt20_res_alpha = eegVoltage(alpha_data,20)
+    volt20_res_beta = eegVoltage(beta_data,20)
+    volt20_res_gamma = eegVoltage(gamma_data,20)
+    volt50_res_delta = eegVoltage(delta_data,50)
+    volt50_res_theta = eegVoltage(theta_data,50)
+    volt50_res_alpha = eegVoltage(alpha_data,50)
+    volt50_res_beta = eegVoltage(beta_data,50)
+    volt50_res_gamma = eegVoltage(gamma_data,50)
+    volt100_res_delta = eegVoltage(delta_data,100)
+    volt100_res_theta = eegVoltage(theta_data,100)
+    volt100_res_alpha = eegVoltage(alpha_data,100)
+    volt100_res_beta = eegVoltage(beta_data,100)
+    volt100_res_gamma = eegVoltage(gamma_data,100)
+    print('volt100_res_delta shape: ',volt100_res_delta.shape)
+    print('volt100_res_theta shape: ',volt100_res_theta.shape)
+    print('volt100_res_alpha shape: ',volt100_res_alpha.shape)
+    print('volt100_res_beta shape: ',volt100_res_beta.shape)
+    print('volt100_res_gamma shape: ',volt100_res_gamma.shape)
+    print('volt50_res_delta shape: ',volt50_res_delta.shape)
+    print('volt50_res_theta shape: ',volt50_res_theta.shape)
+    print('volt50_res_alpha shape: ',volt50_res_alpha.shape)
+    print('volt50_res_beta shape: ',volt50_res_beta.shape)
+    print('volt50_res_gamma shape: ',volt50_res_gamma.shape)
+    print('volt20_res_delta shape: ',volt20_res_delta.shape)
+    print('volt20_res_theta shape: ',volt20_res_theta.shape)
+    print('volt20_res_alpha shape: ',volt20_res_alpha.shape)
+    print('volt20_res_beta shape: ',volt20_res_beta.shape)
+    print('volt20_res_gamma shape: ',volt20_res_gamma.shape)
+    print('volt10_res_delta shape: ',volt10_res_delta.shape)
+    print('volt10_res_theta shape: ',volt10_res_theta.shape)
+    print('volt10_res_alpha shape: ',volt10_res_alpha.shape)
+    print('volt10_res_beta shape: ',volt10_res_beta.shape)
+    print('volt10_res_gamma shape: ',volt10_res_gamma.shape)
+    print('volt05_res_delta shape: ',volt05_res_delta.shape)
+    print('volt05_res_theta shape: ',volt05_res_theta.shape)
+    print('volt05_res_alpha shape: ',volt05_res_alpha.shape)
+    print('volt05_res_beta shape: ',volt05_res_beta.shape)
+    print('volt05_res_gamma shape: ',volt05_res_gamma.shape)
+    sharpSpike_delta = shortSpikeNum(delta_data,minNumSamples)
+    sharpSpike_theta = shortSpikeNum(theta_data,minNumSamples)
+    sharpSpike_alpha = shortSpikeNum(alpha_data,minNumSamples)
+    sharpSpike_beta = shortSpikeNum(beta_data,minNumSamples)
+    sharpSpike_gamma = shortSpikeNum(gamma_data,minNumSamples)
+    sampEN_delta = sample_entropy(delta_data[0])
+    sampEN_theta = sample_entropy(theta_data[0])
+    sampEN_alpha = sample_entropy(alpha_data[0])
+    sampEN_beta = sample_entropy(beta_data[0])
+    sampEN_gamma = sample_entropy(gamma_data[0])
+    multiscaleEN_delta = multiscale_entropy(delta_data[0])
+    multiscaleEN_theta = multiscale_entropy(theta_data[0])
+    multiscaleEN_alpha = multiscale_entropy(alpha_data[0])
+    multiscaleEN_beta = multiscale_entropy(beta_data[0])
+    multiscaleEN_gamma = multiscale_entropy(gamma_data[0])
+    permEN_delta = permutation_entropy(delta_data[0])
+    permEN_theta = permutation_entropy(theta_data[0])
+    permEN_alpha = permutation_entropy(alpha_data[0])
+    permEN_beta = permutation_entropy(beta_data[0])
+    permEN_gamma = permutation_entropy(gamma_data[0])
+    specEN_delta = spectral_entropy(delta_data[0],fs)
+    specEN_theta = spectral_entropy(theta_data[0],fs)
+    specEN_alpha = spectral_entropy(alpha_data[0],fs)
+    specEN_beta = spectral_entropy(beta_data[0],fs)
+    specEN_gamma = spectral_entropy(gamma_data[0],fs)
+    svdEN_delta = svd_entropy(delta_data[0])
+    svdEN_theta = svd_entropy(theta_data[0])
+    svdEN_alpha = svd_entropy(alpha_data[0])
+    svdEN_beta = svd_entropy(beta_data[0])
+    svdEN_gamma = svd_entropy(gamma_data[0])
+    appEN_delta = app_entropy(delta_data[0])
+    appEN_theta = app_entropy(theta_data[0])
+    appEN_alpha = app_entropy(alpha_data[0])
+    appEN_beta = app_entropy(beta_data[0])
+    appEN_gamma = app_entropy(gamma_data[0])
+    lziv_delta = lziv(delta_data[0])
+    lziv_theta = lziv(theta_data[0])
+    lziv_alpha = lziv(alpha_data[0])
+    lziv_beta = lziv(beta_data[0])
+    lziv_gamma = lziv(gamma_data[0])
+    petrosianFD_delta = petrosian(delta_data[0])
+    petrosianFD_theta = petrosian(theta_data[0])
+    petrosianFD_alpha = petrosian(alpha_data[0])
+    petrosianFD_beta = petrosian(beta_data[0])
+    petrosianFD_gamma = petrosian(gamma_data[0])
+    katzFD_delta = katz(delta_data[0])
+    katzFD_theta = katz(theta_data[0])
+    katzFD_alpha = katz(alpha_data[0])
+    katzFD_beta = katz(beta_data[0])
+    katzFD_gamma = katz(gamma_data[0])
+    dfa_delta = dfa(delta_data[0])
+    dfa_theta = dfa(theta_data[0])
+    dfa_alpha = dfa(alpha_data[0])
+    dfa_beta = dfa(beta_data[0])
+    dfa_gamma = dfa(gamma_data[0])
 
-##########
-# Mutual information
-def calculate2Chan_MI(eegData,ii,jj,bin_min=-200, bin_max=200, binWidth=2):
-    H = np.zeros(eegData.shape[2])
-    bins = np.arange(bin_min+1, bin_max, binWidth)
-    for epoch in range(eegData.shape[2]):
-        c_xy = np.histogram2d(eegData[ii,:,epoch],eegData[jj,:,epoch],bins)[0]
-        H[epoch] = mutual_info_score(None, None, contingency=c_xy)
-    return H
+    # print shape of all the features
+    print('shannonRes shape: ',shannonRes.shape)
+    print('lyapunovRes shape: ',LyapunovRes.shape)
+    print('higuchiRes shape: ',HiguchiFD_Res.shape)
+    print('hjorthmob shape: ',HjorthMob.shape)
+    print('hjorthcomp shape: ',HjorthComp.shape)
+    print('medianFreq shape: ',medianFreqRes.shape)
+    print('delta_rbandpwr shape: ',delta_rbandpwr.shape)
+    print('theta_rbandpwr shape: ',theta_rbandpwr.shape)
+    print('alpha_rbandpwr shape: ',alpha_rbandpwr.shape)
+    print('beta_rbandpwr shape: ',beta_rbandpwr.shape)
+    print('gamma_rbandpwr shape: ',gamma_rbandpwr.shape)
+    print('std shape: ',stdRes.shape)
+    print('delta_theta_ratio shape: ',delta_theta_ratio.shape)
+    print('theta_delta_ratio shape: ',theta_delta_ratio.shape)
+    print('delta_alpha_ratio shape: ',delta_alpha_ratio.shape)
+    print('alpha_delta_ratio shape: ',alpha_delta_ratio.shape)
+    print('delta_beta_ratio shape: ',delta_beta_ratio.shape)
+    print('beta_delta_ratio shape: ',beta_delta_ratio.shape)
+    print('delta_gamma_ratio shape: ',delta_gamma_ratio.shape)
+    print('gamma_delta_ratio shape: ',gamma_delta_ratio.shape)
+    print('theta_alpha_ratio shape: ',theta_alpha_ratio.shape)
+    print('alpha_theta_ratio shape: ',alpha_theta_ratio.shape)
+    print('theta_beta_ratio shape: ',theta_beta_ratio.shape)
+    print('beta_theta_ratio shape: ',beta_theta_ratio.shape)
+    print('theta_gamma_ratio shape: ',theta_gamma_ratio.shape)
+    print('gamma_theta_ratio shape: ',gamma_theta_ratio.shape)
+    print('alpha_beta_ratio shape: ',alpha_beta_ratio.shape)
+    print('beta_alpha_ratio shape: ',beta_alpha_ratio.shape)
+    print('alpha_gamma_ratio shape: ',alpha_gamma_ratio.shape)
+    print('gamma_alpha_ratio shape: ',gamma_alpha_ratio.shape)
+    print('beta_gamma_ratio shape: ',beta_gamma_ratio.shape)
+    print('gamma_beta_ratio shape: ',gamma_beta_ratio.shape)
+    print('regularity shape: ',regularity_res.shape)
+    print('volt05 shape: ',volt05_res.shape)
+    print('volt10 shape: ',volt10_res.shape)
+    print('volt20 shape: ',volt20_res.shape)
+    print('volt50 shape: ',volt50_res.shape)
+    print('volt100 shape: ',volt100_res.shape)
+    print('sharpSpike shape: ',sharpSpike.shape)
+    print('sampEN:',sampEN.shape)
+    print('multiscaleEN:',multiscaleEN.shape)
+    print('permEN:',permEN.shape)
+    print('specEN:',specEN.shape)
+    print('svdEN:',svdEN.shape)
+    print('appEN:',appEN.shape)
+    print('lziv:',lziv_comp.shape)
+    print('petrosianFD:',petrosian_fd.shape)
+    print('katzFD:',katz_fd.shape)
+    print('dfa:',dfa_fd.shape)
+    
 
-##########
-# Granger causality
-def calcGrangerCausality(eegData,ii,jj):
-    H = np.zeros(eegData.shape[2])
-    for epoch in range(eegData.shape[2]):
-        X = np.vstack([eegData[ii,:,epoch],eegData[jj,:,epoch]]).T
-        H[epoch] = tsa.stattools.grangercausalitytests(X, 1, addconst=True, verbose=False)[1][0]['ssr_ftest'][0]
-    return H
+    # Create a list of all the features names
+    feat_names = ['shannonRes_'+data_name, 'lyapunovRes_'+data_name, 'higuchiRes_'+data_name,
+                    'hjorthmob_'+data_name, 'hjorthcomp_'+data_name, 'medianFreq_'+data_name,
+                    'delta_rbandpwr_'+data_name, 'theta_rbandpwr_'+data_name, 'alpha_rbandpwr_'+data_name,
+                    'beta_rbandpwr_'+data_name, 'gamma_rbandpwr_'+data_name, 'std_'+data_name,
+                    'delta_theta_ratio_'+data_name, 'theta_delta_ratio_'+data_name, 'delta_alpha_ratio_'+data_name,
+                    'alpha_delta_ratio_'+data_name, 'delta_beta_ratio_'+data_name, 'beta_delta_ratio_'+data_name,
+                    'delta_gamma_ratio_'+data_name, 'gamma_delta_ratio_'+data_name, 'theta_alpha_ratio_'+data_name,
+                    'alpha_theta_ratio_'+data_name, 'theta_beta_ratio_'+data_name, 'beta_theta_ratio_'+data_name,
+                    'theta_gamma_ratio_'+data_name, 'gamma_theta_ratio_'+data_name, 'alpha_beta_ratio_'+data_name,
+                    'beta_alpha_ratio_'+data_name, 'alpha_gamma_ratio_'+data_name, 'gamma_alpha_ratio_'+data_name,
+                    'beta_gamma_ratio_'+data_name, 'gamma_beta_ratio_'+data_name, 'regularity_'+data_name,
+                    'volt05_res_'+data_name, 'volt10_res_'+data_name, 'volt20_res_'+data_name, 'volt50_res_'+data_name, 'volt100_res_'+data_name,
+                    'sharpSpike_'+data_name, 'sampEN_'+data_name, 'multiscaleEN_'+data_name, 'permEN_'+data_name, 'specEN_'+data_name,
+                    'svdEN_'+data_name, 'appEN_'+data_name, 'lziv_'+data_name, 'petrosianFD_'+data_name, 'katzFD_'+data_name, 'dfa_'+data_name,
+                    'shannonRes_delta_'+data_name, 'shannonRes_theta_'+data_name, 'shannonRes_alpha_'+data_name, 'shannonRes_beta_'+data_name, 'shannonRes_gamma_'+data_name,
+                    'lyapunovRes_delta_'+data_name, 'lyapunovRes_theta_'+data_name, 'lyapunovRes_alpha_'+data_name, 'lyapunovRes_beta_'+data_name, 'lyapunovRes_gamma_'+data_name,
+                    'higuchiRes_delta_'+data_name, 'higuchiRes_theta_'+data_name, 'higuchiRes_alpha_'+data_name, 'higuchiRes_beta_'+data_name, 'higuchiRes_gamma_'+data_name,
+                    'hjorthmob_delta_'+data_name, 'hjorthmob_theta_'+data_name, 'hjorthmob_alpha_'+data_name, 'hjorthmob_beta_'+data_name, 'hjorthmob_gamma_'+data_name,
+                    'hjorthcomp_delta_'+data_name, 'hjorthcomp_theta_'+data_name, 'hjorthcomp_alpha_'+data_name, 'hjorthcomp_beta_'+data_name, 'hjorthcomp_gamma_'+data_name,
+                    'std_delta_'+data_name, 'std_theta_'+data_name, 'std_alpha_'+data_name, 'std_beta_'+data_name, 'std_gamma_'+data_name,
+                    'regularity_delta_'+data_name, 'regularity_theta_'+data_name, 'regularity_alpha_'+data_name, 'regularity_beta_'+data_name, 'regularity_gamma_'+data_name,
+                    'volt05_res_delta_'+data_name, 'volt05_res_theta_'+data_name, 'volt05_res_alpha_'+data_name, 'volt05_res_beta_'+data_name, 'volt05_res_gamma_'+data_name,
+                    'volt10_res_delta_'+data_name, 'volt10_res_theta_'+data_name, 'volt10_res_alpha_'+data_name, 'volt10_res_beta_'+data_name, 'volt10_res_gamma_'+data_name,
+                    'volt20_res_delta_'+data_name, 'volt20_res_theta_'+data_name, 'volt20_res_alpha_'+data_name, 'volt20_res_beta_'+data_name, 'volt20_res_gamma_'+data_name,
+                    'volt50_res_delta_'+data_name, 'volt50_res_theta_'+data_name, 'volt50_res_alpha_'+data_name, 'volt50_res_beta_'+data_name, 'volt50_res_gamma_'+data_name,
+                    'volt100_res_delta_'+data_name, 'volt100_res_theta_'+data_name, 'volt100_res_alpha_'+data_name, 'volt100_res_beta_'+data_name, 'volt100_res_gamma_'+data_name,
+                    'sharpSpike_delta_'+data_name, 'sharpSpike_theta_'+data_name, 'sharpSpike_alpha_'+data_name, 'sharpSpike_beta_'+data_name, 'sharpSpike_gamma_'+data_name,
+                    'sampEN_delta_'+data_name, 'sampEN_theta_'+data_name, 'sampEN_alpha_'+data_name, 'sampEN_beta_'+data_name, 'sampEN_gamma_'+data_name,
+                    'multiscaleEN_delta_'+data_name, 'multiscaleEN_theta_'+data_name, 'multiscaleEN_alpha_'+data_name, 'multiscaleEN_beta_'+data_name, 'multiscaleEN_gamma_'+data_name,
+                    'permEN_delta_'+data_name, 'permEN_theta_'+data_name, 'permEN_alpha_'+data_name, 'permEN_beta_'+data_name, 'permEN_gamma_'+data_name,
+                    'specEN_delta_'+data_name, 'specEN_theta_'+data_name, 'specEN_alpha_'+data_name, 'specEN_beta_'+data_name, 'specEN_gamma_'+data_name,
+                    'svdEN_delta_'+data_name, 'svdEN_theta_'+data_name, 'svdEN_alpha_'+data_name, 'svdEN_beta_'+data_name, 'svdEN_gamma_'+data_name,
+                    'appEN_delta_'+data_name, 'appEN_theta_'+data_name, 'appEN_alpha_'+data_name, 'appEN_beta_'+data_name, 'appEN_gamma_'+data_name,
+                    'lziv_delta_'+data_name, 'lziv_theta_'+data_name, 'lziv_alpha_'+data_name, 'lziv_beta_'+data_name, 'lziv_gamma_'+data_name,
+                    'petrosianFD_delta_'+data_name, 'petrosianFD_theta_'+data_name, 'petrosianFD_alpha_'+data_name, 'petrosianFD_beta_'+data_name, 'petrosianFD_gamma_'+data_name,
+                    'katzFD_delta_'+data_name, 'katzFD_theta_'+data_name, 'katzFD_alpha_'+data_name, 'katzFD_beta_'+data_name, 'katzFD_gamma_'+data_name,
+                    'dfa_delta_'+data_name, 'dfa_theta_'+data_name, 'dfa_alpha_'+data_name, 'dfa_beta_'+data_name, 'dfa_gamma_'+data_name]
 
-##########
-# phase Lag Index
-def phaseLagIndex(eegData, i, j):
-    hxi = ss.hilbert(eegData[i,:,:])
-    hxj = ss.hilbert(eegData[j,:,:])
-    # calculating the INSTANTANEOUS PHASE
-    inst_phasei = np.arctan(np.angle(hxi))
-    inst_phasej = np.arctan(np.angle(hxj))
+    conc_data = np.vstack((shannonRes, LyapunovRes,HiguchiFD_Res, HjorthMob, HjorthComp, medianFreqRes, delta_rbandpwr, theta_rbandpwr, alpha_rbandpwr, beta_rbandpwr, gamma_rbandpwr,
+                        stdRes, delta_theta_ratio, theta_delta_ratio, delta_alpha_ratio, alpha_delta_ratio, delta_beta_ratio, beta_delta_ratio, delta_gamma_ratio, gamma_delta_ratio,
+                        theta_alpha_ratio, alpha_theta_ratio, theta_beta_ratio, beta_theta_ratio, theta_gamma_ratio, gamma_theta_ratio, alpha_beta_ratio, beta_alpha_ratio, alpha_gamma_ratio, gamma_alpha_ratio,
+                        beta_gamma_ratio, gamma_beta_ratio,regularity_res, volt05_res, volt10_res, volt20_res, volt50_res, volt100_res, sharpSpike, sampEN, multiscaleEN, permEN, specEN, svdEN, appEN, lziv_comp,
+                        petrosian_fd, katz_fd, dfa_fd, shannonRes_delta, shannonRes_theta, shannonRes_alpha, shannonRes_beta, shannonRes_gamma, LyapunovRes_delta, LyapunovRes_theta, LyapunovRes_alpha, LyapunovRes_beta, LyapunovRes_gamma,
+                        HiguchiFD_Res_delta, HiguchiFD_Res_theta, HiguchiFD_Res_alpha, HiguchiFD_Res_beta, HiguchiFD_Res_gamma, HjorthMob_delta, HjorthMob_theta, HjorthMob_alpha, HjorthMob_beta, HjorthMob_gamma,
+                            HjorthComp_delta, HjorthComp_theta, HjorthComp_alpha, HjorthComp_beta, HjorthComp_gamma, stdRes_delta, stdRes_theta, stdRes_alpha, stdRes_beta, stdRes_gamma,
+                                regularity_res_delta, regularity_res_theta, regularity_res_alpha, regularity_res_beta, regularity_res_gamma, volt05_res_delta, volt05_res_theta, volt05_res_alpha, volt05_res_beta, volt05_res_gamma,
+                                volt10_res_delta, volt10_res_theta, volt10_res_alpha, volt10_res_beta, volt10_res_gamma, volt20_res_delta, volt20_res_theta, volt20_res_alpha, volt20_res_beta, volt20_res_gamma,
+                                volt50_res_delta, volt50_res_theta, volt50_res_alpha, volt50_res_beta, volt50_res_gamma, volt100_res_delta, volt100_res_theta, volt100_res_alpha, volt100_res_beta, volt100_res_gamma,
+                                sharpSpike_delta, sharpSpike_theta, sharpSpike_alpha, sharpSpike_beta, sharpSpike_gamma, sampEN_delta, sampEN_theta, sampEN_alpha, sampEN_beta, sampEN_gamma,
+                                multiscaleEN_delta, multiscaleEN_theta, multiscaleEN_alpha, multiscaleEN_beta, multiscaleEN_gamma, permEN_delta, permEN_theta, permEN_alpha, permEN_beta, permEN_gamma,
+                                specEN_delta, specEN_theta, specEN_alpha, specEN_beta, specEN_gamma, svdEN_delta, svdEN_theta, svdEN_alpha, svdEN_beta, svdEN_gamma, appEN_delta, appEN_theta, appEN_alpha, appEN_beta, appEN_gamma,
+                                lziv_delta, lziv_theta, lziv_alpha, lziv_beta, lziv_gamma, petrosianFD_delta, petrosianFD_theta, petrosianFD_alpha, petrosianFD_beta, petrosianFD_gamma, katzFD_delta, katzFD_theta, katzFD_alpha, katzFD_beta, katzFD_gamma,
+                                dfa_delta, dfa_theta, dfa_alpha, dfa_beta, dfa_gamma))
 
-    out = np.abs(np.mean(np.sign(inst_phasej - inst_phasei), axis=0))
-    return out
+    conc_data = conc_data.T
 
-##########
-# Cross-correlation Magnitude
-def crossCorrMag(eegData,ii,jj):
-	crossCorr_res = []
-	for ii, jj in itertools.combinations(range(eegData.shape[0]), 2):
-		crossCorr_res.append(crossCorrelation(eegData, ii, jj))
-	crossCorr_res = np.array(crossCorr_res)
-	return crossCorr_res
+    conc_data = pd.DataFrame(conc_data, columns=feat_names)
+    print('Features extracted')
+    return conc_data
 
-##########
-# Cross-correlation Lag
-def corrCorrLag(eegData,ii,jj,fs=100):
-	crossCorrLag_res = []
-	for ii, jj in itertools.combinations(range(eegData.shape[0]), 2):
-		crossCorrLag_res.append(corrCorrLag(eegData, ii, jj, fs))
-	crossCorrLag_res = np.array(crossCorrLag_res)
-	return crossCorrLag_res
