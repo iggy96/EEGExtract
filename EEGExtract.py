@@ -468,7 +468,7 @@ def shortSpikeNum(eegData,minNumSamples=7,stdAway = 3):
 
 
 
-def compile_features(data,fs,delta,theta,alpha,beta,gamma,data_name):
+def compile_features(data,fs,delta,theta,alpha,beta,gamma,data_name,label):
     """
     data: (1, epoch_length, num_epochs)
     """
@@ -672,6 +672,9 @@ def compile_features(data,fs,delta,theta,alpha,beta,gamma,data_name):
     dfa_alpha = dfa(alpha_data[0])
     dfa_beta = dfa(beta_data[0])
     dfa_gamma = dfa(gamma_data[0])
+    
+    label = np.array(['clean' for i in range(len(shannonRes))])
+
 
     # print shape of all the features
     print('shannonRes shape: ',shannonRes.shape)
@@ -762,7 +765,7 @@ def compile_features(data,fs,delta,theta,alpha,beta,gamma,data_name):
                     'lziv_delta_'+data_name, 'lziv_theta_'+data_name, 'lziv_alpha_'+data_name, 'lziv_beta_'+data_name, 'lziv_gamma_'+data_name,
                     'petrosianFD_delta_'+data_name, 'petrosianFD_theta_'+data_name, 'petrosianFD_alpha_'+data_name, 'petrosianFD_beta_'+data_name, 'petrosianFD_gamma_'+data_name,
                     'katzFD_delta_'+data_name, 'katzFD_theta_'+data_name, 'katzFD_alpha_'+data_name, 'katzFD_beta_'+data_name, 'katzFD_gamma_'+data_name,
-                    'dfa_delta_'+data_name, 'dfa_theta_'+data_name, 'dfa_alpha_'+data_name, 'dfa_beta_'+data_name, 'dfa_gamma_'+data_name]
+                    'dfa_delta_'+data_name, 'dfa_theta_'+data_name, 'dfa_alpha_'+data_name, 'dfa_beta_'+data_name, 'dfa_gamma_'+data_name,'label']
 
     conc_data = np.vstack((shannonRes, LyapunovRes,HiguchiFD_Res, HjorthMob, HjorthComp, medianFreqRes, delta_rbandpwr, theta_rbandpwr, alpha_rbandpwr, beta_rbandpwr, gamma_rbandpwr,
                         stdRes, delta_theta_ratio, theta_delta_ratio, delta_alpha_ratio, alpha_delta_ratio, delta_beta_ratio, beta_delta_ratio, delta_gamma_ratio, gamma_delta_ratio,
@@ -778,7 +781,7 @@ def compile_features(data,fs,delta,theta,alpha,beta,gamma,data_name):
                                 multiscaleEN_delta, multiscaleEN_theta, multiscaleEN_alpha, multiscaleEN_beta, multiscaleEN_gamma, permEN_delta, permEN_theta, permEN_alpha, permEN_beta, permEN_gamma,
                                 specEN_delta, specEN_theta, specEN_alpha, specEN_beta, specEN_gamma, svdEN_delta, svdEN_theta, svdEN_alpha, svdEN_beta, svdEN_gamma, appEN_delta, appEN_theta, appEN_alpha, appEN_beta, appEN_gamma,
                                 lziv_delta, lziv_theta, lziv_alpha, lziv_beta, lziv_gamma, petrosianFD_delta, petrosianFD_theta, petrosianFD_alpha, petrosianFD_beta, petrosianFD_gamma, katzFD_delta, katzFD_theta, katzFD_alpha, katzFD_beta, katzFD_gamma,
-                                dfa_delta, dfa_theta, dfa_alpha, dfa_beta, dfa_gamma))
+                                dfa_delta, dfa_theta, dfa_alpha, dfa_beta, dfa_gamma,label))
 
     conc_data = conc_data.T
 
